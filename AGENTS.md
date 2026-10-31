@@ -4,7 +4,19 @@ A small Rust service between self-hosted services and LLM providers (Mistral fir
 
 ## Status
 
-Planned, no code yet. The work is in the GitHub issues. The surrounding architecture (one service per kind of thing, spheres, a central configuration) is documented privately with the server's infrastructure in `../server-infra/docs/assistant/` (ADR 0003 there is this gateway's reason to exist).
+Batch embeddings from Mistral (through the `genai` crate) with caller keys, usage accounting and a monthly budget are implemented (#1); the API and configuration are in `README.md`. Retries, rate limits and sphere rules (#2) and the owner's usage view (#3) are next; the work is in the GitHub issues. The surrounding architecture (one service per kind of thing, spheres, a central configuration) is documented privately with the server's infrastructure in `../server-infra/docs/assistant/` (ADR 0003 there is this gateway's reason to exist).
+
+## Architecture
+
+One crate, `crates/llm-gateway` (library plus the `llm-gateway` binary):
+
+- `api`: the axum HTTP API and its error answers (`{"error": {"code", ...}}`).
+- `Gateway` (`lib.rs`): validates a request, checks the budget, calls the provider, records usage. The clock is injected so tests can move between months.
+- `provider`: the `Provider` trait and `Mistral`, which calls `genai` with an explicit `ServiceTarget` (endpoint, key and adapter), so genai never guesses from model names or the environment.
+- `usage`: the SQLite usage database (`usage` and `refusal` tables, migrations in `crates/llm-gateway/migrations/`).
+- `money`: exact amounts in nano-euros and prices per model; `callers`: caller keys, kept as SHA-256 digests.
+
+Tests use a fake `Provider` (`tests/embeddings.rs`) and a fake Mistral HTTP API (`tests/mistral.rs`); one ignored test calls the real API when `LLM_GATEWAY_MISTRAL_API_KEY` is set.
 
 ## Design constraints
 

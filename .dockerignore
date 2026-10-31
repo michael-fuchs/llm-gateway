@@ -1,0 +1,6 @@
+target
+.git
+*.db
+*.db-shm
+*.db-wal
+Scratch.md

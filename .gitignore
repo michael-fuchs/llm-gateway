@@ -1,3 +1,6 @@
 /target
 Scratch.md
 .claude/worktrees/
+*.db
+*.db-shm
+*.db-wal
