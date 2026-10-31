@@ -4,7 +4,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use llm_gateway::{Callers, Eur, Gateway, Mistral, Prices, UsageStore};
+use std::time::Duration;
+
+use llm_gateway::{
+    Callers, Eur, Gateway, Mistral, Prices, RateLimit, RetryPolicy, Spheres, UsageStore,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -56,6 +60,20 @@ struct ServeArgs {
         default_value = llm_gateway::DEFAULT_PRICES
     )]
     prices: Vec<String>,
+    /// The spheres and their rules, as rendered from the assistant's central configuration.
+    /// Requests for spheres not declared there are refused.
+    #[arg(long, env = "LLM_GATEWAY_SPHERES")]
+    spheres: PathBuf,
+    /// Texts each caller may send for embedding per minute; also the largest batch.
+    #[arg(long, env = "LLM_GATEWAY_INPUTS_PER_MINUTE", default_value_t = llm_gateway::limits::DEFAULT_INPUTS_PER_MINUTE, value_parser = clap::value_parser!(u32).range(1..))]
+    inputs_per_minute: u32,
+    /// The longest a provider call may take in seconds, retries included; then the request
+    /// fails with provider_failure.
+    #[arg(long, env = "LLM_GATEWAY_PROVIDER_TIME_LIMIT", default_value_t = RetryPolicy::default().time_limit.as_secs(), value_parser = clap::value_parser!(u64).range(1..))]
+    provider_time_limit: u64,
+    /// The longest a single attempt waits for the provider's answer, in seconds.
+    #[arg(long, env = "LLM_GATEWAY_PROVIDER_ATTEMPT_TIMEOUT", default_value_t = RetryPolicy::default().attempt_timeout.as_secs(), value_parser = clap::value_parser!(u64).range(1..))]
+    provider_attempt_timeout: u64,
 }
 
 #[tokio::main]
@@ -77,14 +95,24 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         bail!("no callers are configured");
     }
     let prices = Prices::parse(&args.prices).map_err(anyhow::Error::msg)?;
+    let spheres = Spheres::load(&args.spheres).map_err(anyhow::Error::msg)?;
+    let mut sphere_names: Vec<_> = spheres.names().collect();
+    sphere_names.sort_unstable();
     let store = UsageStore::open(&args.db)
         .with_context(|| format!("opening the usage database {}", args.db.display()))?;
-    tracing::info!(?callers, budget = %args.budget_eur, "configured");
+    tracing::info!(?callers, spheres = ?sphere_names, budget = %args.budget_eur, "configured");
 
     let gateway = Arc::new(Gateway {
         callers,
         prices,
         budget: args.budget_eur,
+        spheres,
+        rate_limit: RateLimit::new(args.inputs_per_minute),
+        retry: RetryPolicy {
+            time_limit: Duration::from_secs(args.provider_time_limit),
+            attempt_timeout: Duration::from_secs(args.provider_attempt_timeout),
+            ..RetryPolicy::default()
+        },
         provider: Arc::new(
             Mistral::new(args.mistral_api_key, &args.mistral_url)
                 .context("creating the Mistral client")?,

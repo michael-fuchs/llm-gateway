@@ -116,11 +116,25 @@ impl IntoResponse for ApiError {
             ApiError::Embed(EmbedError::UnknownModel(_)) => {
                 (StatusCode::BAD_REQUEST, "unknown_model")
             }
+            ApiError::Embed(EmbedError::UnknownSphere(_)) => {
+                (StatusCode::BAD_REQUEST, "unknown_sphere")
+            }
+            ApiError::Embed(EmbedError::SphereRule { .. }) => {
+                (StatusCode::FORBIDDEN, "sphere_rule")
+            }
+            ApiError::Embed(EmbedError::RateLimited { retry_after, .. }) => {
+                // Whole seconds, rounded up, so a caller that waits this long gets through.
+                let seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+                headers.insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+                error["retry_after_seconds"] = json!(seconds);
+                (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
+            }
             ApiError::Embed(EmbedError::BudgetExhausted {
                 until, retry_after, ..
             }) => {
                 headers.insert(header::RETRY_AFTER, HeaderValue::from(*retry_after));
                 error["retry_at"] = json!(until.to_string());
+                error["retry_after_seconds"] = json!(retry_after);
                 (StatusCode::TOO_MANY_REQUESTS, "budget_exhausted")
             }
             ApiError::Embed(EmbedError::Provider(err)) => {
