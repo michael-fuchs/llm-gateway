@@ -9,4 +9,6 @@
 - **Usage:** the record of one answered call: caller, sphere, provider, model, input tokens and estimated cost.
 - **Budget:** the most the estimated costs of all callers together may reach in a calendar month (UTC).
 - **Refusal:** a request the gateway turned down before contacting the provider for a reason the owner should see: `sphere_rule`, `budget_exhausted` or `rate_limited`. Recorded with its reason.
+- **Owner:** the person whose assistant this is; the only one who may see the usage view, as a member of the owner group at the OIDC provider.
+- **Usage view:** the owner's page showing the budget, usage and refusals per month.
 - **Transient / permanent failure:** a provider failure that may go away (rate limited, overloaded, no answer), which the gateway retries, versus one that repeats on every try (rejected key or request), which it reports at once. Invalid or unauthenticated requests are errors, not refusals.

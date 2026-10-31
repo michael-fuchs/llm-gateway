@@ -1,0 +1,68 @@
+/* The usage view's look, following mnemograph's so the assistant's UIs feel alike. */
+:root {
+  --bg: #fdfdfc; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+  --accent: #2f5fb3; --warn: #b0452f;
+  --line-0: #4e79a7; --line-1: #59a14f; --line-2: #e1a23b; --line-3: #b07aa1;
+  --line-4: #76b7b2; --line-5: #9c755f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181a; --fg: #e6e6e3; --muted: #9a9a95; --line: #333337;
+    --accent: #8fb0ef; --warn: #e58c75;
+    --line-0: #7da7d9; --line-1: #8cc97f; --line-2: #f0c060; --line-3: #d3a4c6;
+    --line-4: #9fd8d2; --line-5: #c49a80;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header.site {
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  padding: 0.6rem 1rem; border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 600; color: var(--fg); text-decoration: none; }
+.session { display: flex; gap: 0.6rem; align-items: center; margin: 0; color: var(--muted); min-width: 0; }
+.session span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session button {
+  font: inherit; font-size: 0.9rem; padding: 0.2rem 0.7rem; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg);
+}
+main { max-width: 60rem; margin: 0 auto; padding: 1rem 1rem 4rem; }
+a { color: var(--accent); }
+h1 { margin: 0.8rem 0 0.4rem; line-height: 1.25; }
+h2 { font-size: 1.1rem; margin: 2rem 0 0.5rem; }
+.meta, .empty { color: var(--muted); font-size: 0.9rem; }
+nav.months { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+nav.months h1 { text-align: center; }
+nav.months a { text-decoration: none; white-space: nowrap; }
+.meter { height: 0.8rem; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; margin-top: 1rem; }
+.meter span { display: block; height: 100%; background: var(--accent); }
+.meter.over span { background: var(--warn); }
+.totals { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 1rem 0; }
+.totals > div { flex: 1 1 6.5rem; border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 0.8rem; }
+.totals dt { color: var(--muted); font-size: 0.85rem; }
+.totals dd { margin: 0; font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--line); }
+th { font-size: 0.85rem; color: var(--muted); font-weight: 500; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.nowrap { white-space: nowrap; }
+.table-scroll { overflow-x: auto; }
+.chart { margin: 0.5rem 0; }
+.chart-plot { position: relative; height: 12rem; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.chart-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart-plot .grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 2 4; }
+.chart-plot polyline { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.chart-max { position: absolute; top: -0.6rem; left: 0.3rem; font-size: 0.8rem; color: var(--muted); }
+.chart-x { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
+.legend > span { white-space: nowrap; }
+.swatch { display: inline-block; width: 0.75rem; height: 0.75rem; border-radius: 50%; vertical-align: -0.05rem; }
+@media (max-width: 34rem) {
+  main { padding: 0.5rem 0.75rem 3rem; }
+  h1 { font-size: 1.4rem; }
+  .totals > div { flex-basis: 40%; }
+  th, td { padding: 0.3rem 0.4rem; }
+}

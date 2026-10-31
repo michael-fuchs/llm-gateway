@@ -74,6 +74,40 @@ struct ServeArgs {
     /// The longest a single attempt waits for the provider's answer, in seconds.
     #[arg(long, env = "LLM_GATEWAY_PROVIDER_ATTEMPT_TIMEOUT", default_value_t = RetryPolicy::default().attempt_timeout.as_secs(), value_parser = clap::value_parser!(u64).range(1..))]
     provider_attempt_timeout: u64,
+    /// Address for the owner's usage view, a separate listener so that only it is exposed to
+    /// browsers. Without it, there is no usage view.
+    #[arg(long, env = "LLM_GATEWAY_WEB_LISTEN")]
+    web_listen: Option<SocketAddr>,
+    /// Issuer of the owner's ID tokens (the OIDC provider), exactly as in their `iss` claim.
+    /// Without it, the usage view has no login and is only allowed on a loopback address.
+    #[arg(long, env = "LLM_GATEWAY_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+    /// The URL under which the owner's browser reaches the usage view; the login returns to
+    /// `<public-url>/auth/callback`.
+    #[arg(
+        long,
+        env = "LLM_GATEWAY_PUBLIC_URL",
+        default_value = "http://localhost:8081"
+    )]
+    public_url: String,
+    /// Client ID of the usage view at the OIDC provider.
+    #[arg(
+        long,
+        env = "LLM_GATEWAY_WEB_CLIENT_ID",
+        default_value = "llm-gateway-web"
+    )]
+    web_client_id: String,
+    /// Secret of the usage view's client, if it is confidential; a public client uses PKCE
+    /// alone.
+    #[arg(long, env = "LLM_GATEWAY_WEB_CLIENT_SECRET", hide_env_values = true)]
+    web_client_secret: Option<String>,
+    /// Only members of this group at the OIDC provider may log in to the usage view.
+    #[arg(
+        long,
+        env = "LLM_GATEWAY_OWNER_GROUP",
+        default_value = "llm_gateway_owner"
+    )]
+    owner_group: String,
 }
 
 #[tokio::main]
@@ -114,21 +148,76 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             ..RetryPolicy::default()
         },
         provider: Arc::new(
-            Mistral::new(args.mistral_api_key, &args.mistral_url)
+            Mistral::new(args.mistral_api_key.clone(), &args.mistral_url)
                 .context("creating the Mistral client")?,
         ),
         store,
         clock: llm_gateway::system_clock(),
     });
 
+    let web = match args.web_listen {
+        Some(web_listen) => {
+            let login = web_login(&args, web_listen).await?;
+            let listener = tokio::net::TcpListener::bind(web_listen)
+                .await
+                .with_context(|| format!("binding {web_listen}"))?;
+            tracing::info!(listen = %web_listen, "serving the usage view");
+            Some((listener, llm_gateway::web::router(gateway.clone(), login)))
+        }
+        None => None,
+    };
+
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("binding {}", args.listen))?;
-    tracing::info!(listen = %args.listen, "serving");
-    axum::serve(listener, llm_gateway::api::router(gateway))
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    tracing::info!(listen = %args.listen, "serving the API");
+
+    let (stop, stopped) = tokio::sync::watch::channel(());
+    tokio::spawn(async move {
+        shutdown().await;
+        let _ = stop.send(());
+    });
+    let until_stopped = |mut stopped: tokio::sync::watch::Receiver<()>| async move {
+        let _ = stopped.changed().await;
+    };
+    let api = axum::serve(listener, llm_gateway::api::router(gateway))
+        .with_graceful_shutdown(until_stopped(stopped.clone()));
+    match web {
+        Some((listener, router)) => {
+            let web = axum::serve(listener, router).with_graceful_shutdown(until_stopped(stopped));
+            tokio::try_join!(api.into_future(), web.into_future())?;
+        }
+        None => api.await?,
+    }
     Ok(())
+}
+
+/// The owner's login for the usage view, or `None` for development on a loopback address.
+async fn web_login(
+    args: &ServeArgs,
+    web_listen: SocketAddr,
+) -> anyhow::Result<Option<llm_gateway::web::LoginSettings>> {
+    let Some(issuer) = &args.oidc_issuer else {
+        if !web_listen.ip().is_loopback() {
+            bail!(
+                "refusing to serve the usage view on {web_listen} without a login: set --oidc-issuer or use a loopback address"
+            );
+        }
+        tracing::warn!("the usage view has no login; anyone on this machine can see it");
+        return Ok(None);
+    };
+    let provider = llm_gateway::web::oidc::Provider::discover(issuer)
+        .await
+        .with_context(|| format!("discovering the OIDC provider {issuer}"))?;
+    let public_url = args.public_url.trim_end_matches('/');
+    Ok(Some(llm_gateway::web::LoginSettings {
+        provider: Arc::new(provider),
+        client_id: args.web_client_id.clone(),
+        client_secret: args.web_client_secret.clone(),
+        redirect_uri: format!("{public_url}/auth/callback"),
+        owner_group: args.owner_group.clone(),
+        secure_cookies: public_url.starts_with("https://"),
+    }))
 }
 
 /// Resolves on Ctrl-C or SIGTERM (what a container runtime sends to stop).

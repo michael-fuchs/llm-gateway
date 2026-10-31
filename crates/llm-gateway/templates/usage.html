@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Usage {{ title }} – LLM gateway{% endblock %}
+{% block session %}
+{% if let Some(owner) = owner %}
+<form class="session" method="post" action="/logout">
+  <span>{{ owner }}</span>
+  <button type="submit">Log out</button>
+</form>
+{% endif %}
+{% endblock %}
+{% block content %}
+<nav class="months">
+  {% if let Some(previous) = previous %}<a href="/?month={{ previous }}" rel="prev">← Earlier</a>{% else %}<span></span>{% endif %}
+  <h1>{{ title }}</h1>
+  {% if let Some(next) = next %}<a href="/?month={{ next }}" rel="next">Later →</a>{% else %}<span></span>{% endif %}
+</nav>
+
+<section aria-label="Budget">
+  <div class="meter{% if over_budget %} over{% endif %}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ meter_percent }}" aria-label="Budget used">
+    <span style="width: {{ meter_percent }}%"></span>
+  </div>
+  <p class="meta">{{ used_percent }} % of the monthly budget of {{ budget }} used{% if current %} so far{% endif %}.{% if over_budget %} New requests are refused until the next month.{% endif %}</p>
+  <dl class="totals">
+    <div><dt>spent</dt><dd>{{ spent }}</dd></div>
+    <div><dt>left</dt><dd>{{ left }}</dd></div>
+    <div><dt>calls</dt><dd>{{ calls }}</dd></div>
+    <div><dt>texts</dt><dd>{{ inputs }}</dd></div>
+    <div><dt>tokens</dt><dd>{{ tokens }}</dd></div>
+    <div><dt>refusals</dt><dd>{{ refusal_total }}</dd></div>
+  </dl>
+</section>
+
+<section>
+  <h2>Cost per day</h2>
+  {% if let Some(html) = chart_html %}
+  {{ html|safe }}
+  <p class="meta">Estimated cost per caller and day (UTC); the number after each caller is its month's total.</p>
+  {% else %}
+  <p class="empty">No calls this month.</p>
+  {% endif %}
+</section>
+
+{% if !by_caller.is_empty() %}
+{% call shares("Per caller", "Caller", by_caller) %}{% endcall %}
+{% call shares("Per sphere", "Sphere", by_sphere) %}{% endcall %}
+{% call shares("Per model", "Model", by_model) %}{% endcall %}
+{% endif %}
+
+<section>
+  <h2>Refusals</h2>
+  {% if refusals.is_empty() %}
+  <p class="empty">No requests were refused this month.</p>
+  {% else %}
+  <p class="meta">Requests the gateway turned down before contacting the provider.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Reason</th><th>Caller</th><th>Sphere</th><th class="num">Count</th><th>Latest</th></tr></thead>
+    <tbody>
+      {% for row in refusals %}
+      <tr><td class="nowrap">{{ row.reason }}</td><td>{{ row.caller }}</td><td>{{ row.sphere }}</td><td class="num">{{ row.count }}</td><td class="nowrap">{{ row.last }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+
+{% if !history.is_empty() %}
+<section>
+  <h2>Earlier months</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Month</th><th class="num">Calls</th><th class="num">Tokens</th><th class="num">Cost</th><th class="num">Refusals</th></tr></thead>
+    <tbody>
+      {% for row in history %}
+      <tr><td class="nowrap"><a href="/?month={{ row.link }}">{{ row.month }}</a></td><td class="num">{{ row.calls }}</td><td class="num">{{ row.tokens }}</td><td class="num nowrap">{{ row.cost }}</td><td class="num">{{ row.refusals }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% macro shares(heading, column, rows) %}
+<section>
+  <h2>{{ heading }}</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>{{ column }}</th><th class="num">Calls</th><th class="num">Texts</th><th class="num">Tokens</th><th class="num">Cost</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr><td>{{ row.key }}</td><td class="num">{{ row.calls }}</td><td class="num">{{ row.inputs }}</td><td class="num">{{ row.tokens }}</td><td class="num nowrap">{{ row.cost }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endmacro %}

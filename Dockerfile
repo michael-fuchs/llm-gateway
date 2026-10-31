@@ -21,7 +21,7 @@ ENV LLM_GATEWAY_DB=/data/llm-gateway.db \
     LLM_GATEWAY_LISTEN=0.0.0.0:8080
 VOLUME /data
 WORKDIR /data
-EXPOSE 8080
+EXPOSE 8080 8081
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/llm-gateway"]
 CMD ["serve"]

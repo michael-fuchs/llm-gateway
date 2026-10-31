@@ -7,9 +7,12 @@ pub mod callers;
 pub mod limits;
 pub mod money;
 pub mod provider;
+pub mod report;
 pub mod retry;
+pub mod sessions;
 pub mod spheres;
 pub mod usage;
+pub mod web;
 
 use std::sync::Arc;
 use std::time::Duration;
