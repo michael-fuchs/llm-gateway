@@ -8,10 +8,17 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
+askama = "0.16"
+askama_web = { version = "0.16", features = ["axum-0.8"] }
 axum = "0.8"
+base64 = "0.23.1"
 clap = { version = "4", features = ["derive", "env"] }
 genai = "0.7.2"
 jiff = "0.2"
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+percent-encoding = "2"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = "2"
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +31,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "pem", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 http-body-util = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }

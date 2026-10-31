@@ -10,7 +10,10 @@ use rusqlite_migration::{M, Migrations};
 use crate::money::Eur;
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("../migrations/0001-usage.sql"))])
+    Migrations::new(vec![
+        M::up(include_str!("../migrations/0001-usage.sql")),
+        M::up(include_str!("../migrations/0002-sessions.sql")),
+    ])
 }
 
 /// A call that reached the provider and was answered.
@@ -70,7 +73,7 @@ impl UsageStore {
         })
     }
 
-    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         // A panic while holding the lock cannot leave a half-written row: each write is one
         // statement. So a poisoned lock is still safe to use.
         self.conn
@@ -160,7 +163,7 @@ impl UsageStore {
     }
 }
 
-fn timestamp(millis: i64) -> Timestamp {
+pub(crate) fn timestamp(millis: i64) -> Timestamp {
     Timestamp::from_millisecond(millis).unwrap_or(Timestamp::UNIX_EPOCH)
 }
 

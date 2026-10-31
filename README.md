@@ -9,7 +9,7 @@ A small LLM gateway for self-hosted services. Services call it instead of an LLM
 
 It is one service of a personal assistant built from independent services (wiki, documents, calendar). Each service keeps its own job queue and calls the gateway for embeddings and, later, other LLM work. The gateway never queues work: it answers or refuses, and callers wait and retry on their side.
 
-Status: batch embeddings from Mistral with usage accounting, a monthly budget, sphere rules, a rate limit per caller and retries against the provider. A usage view for the owner is planned; see the issues.
+Status: batch embeddings from Mistral with usage accounting, a monthly budget, sphere rules, a rate limit per caller and retries against the provider, and a usage view for the owner.
 
 ## API
 
@@ -89,6 +89,19 @@ Every answered call is recorded in the SQLite database with its time, caller, sp
 
 The budget covers all callers together for a calendar month in UTC. Before each call the gateway adds up the month's costs; once they reach the budget, it refuses every request with `budget_exhausted` until the next month, and records the refusal. Since a call's cost is known only after the call, the call that crosses the budget is still answered, so the budget may be overrun by what the calls in flight at that moment cost.
 
+## Usage view
+
+A small page for the owner shows what LLM use costs, month by month:
+
+- the budget used and what is left;
+- calls, texts, tokens and estimated cost per caller, sphere and model, and the cost per day and caller as a chart;
+- refusals by reason, caller and sphere;
+- earlier months with links to them.
+
+It is server-rendered HTML and CSS without JavaScript, follows the browser's light or dark theme and works at phone width. It is served on its own listener (`--web-listen`), apart from the API, so a reverse proxy can expose the page to the owner's browser while the API stays on the internal network.
+
+Access needs the owner's login through an OIDC provider (authorization code flow with PKCE): only members of the owner group (`--owner-group`, from the ID token's `groups` claim) get a session. Register a client for the view at the provider with the redirect URI `<public-url>/auth/callback` and the scopes `openid email groups`. Without `--oidc-issuer` the view has no login, which is only allowed on a loopback address, for development.
+
 ## Configuration
 
 Options are given on the command line or through the environment:
@@ -106,8 +119,14 @@ Options are given on the command line or through the environment:
 | `--inputs-per-minute` | `LLM_GATEWAY_INPUTS_PER_MINUTE` | `1000`                 | Texts each caller may send per minute; also the largest batch.                                                                              |
 | `--provider-time-limit` | `LLM_GATEWAY_PROVIDER_TIME_LIMIT` | `60`               | The longest a provider call may take in seconds, retries included.                                                                         |
 | `--provider-attempt-timeout` | `LLM_GATEWAY_PROVIDER_ATTEMPT_TIMEOUT` | `30`     | The longest one attempt waits for the provider's answer, in seconds.                                                                       |
+| `--web-listen`   | `LLM_GATEWAY_WEB_LISTEN`        | (none: no usage view)       | Address of the usage view, e.g. `0.0.0.0:8081`.                                                                                             |
+| `--oidc-issuer`  | `LLM_GATEWAY_OIDC_ISSUER`       | (none: no login)            | Issuer of the owner's ID tokens, exactly as in their `iss` claim. Required unless the view listens on a loopback address.                  |
+| `--public-url`   | `LLM_GATEWAY_PUBLIC_URL`        | `http://localhost:8081`     | The URL under which the browser reaches the view; cookies are marked `Secure` when it is `https`.                                         |
+| `--web-client-id` | `LLM_GATEWAY_WEB_CLIENT_ID`    | `llm-gateway-web`           | The view's client ID at the OIDC provider.                                                                                                 |
+| `--web-client-secret` | `LLM_GATEWAY_WEB_CLIENT_SECRET` | (none)                | The client's secret if it is confidential; a public client relies on PKCE.                                                                 |
+| `--owner-group`  | `LLM_GATEWAY_OWNER_GROUP`       | `llm_gateway_owner`         | Only members of this group may log in to the view.                                                                                         |
 
-The caller keys and the Mistral key are secrets: pass them through the environment from the server's secret handling, not on the command line. Generate a caller key with, for example, `openssl rand -hex 32`. The log level is set with `RUST_LOG` (default `info`).
+The caller keys, the Mistral key and the web client's secret are secrets: pass them through the environment from the server's secret handling, not on the command line. Generate a caller key with, for example, `openssl rand -hex 32`. The log level is set with `RUST_LOG` (default `info`).
 
 ## Running
 
@@ -116,10 +135,13 @@ printf 'version = 1\n[spheres.work]\n' > spheres.toml
 LLM_GATEWAY_CALLERS=mnemograph=$(openssl rand -hex 32) \
 LLM_GATEWAY_MISTRAL_API_KEY=... \
 LLM_GATEWAY_SPHERES=spheres.toml \
+LLM_GATEWAY_WEB_LISTEN=127.0.0.1:8081 \
 cargo run -- serve
 ```
 
-The container image (`ghcr.io/michael-fuchs/llm-gateway`) is distroless and runs as a non-root user. It listens on port 8080, keeps its database in the volume `/data` and reads the spheres file from `/etc/assistant/spheres.toml`:
+This serves the API on port 8080 and the usage view without a login on <http://127.0.0.1:8081/>.
+
+The container image (`ghcr.io/michael-fuchs/llm-gateway`) is distroless and runs as a non-root user. It serves the API on port 8080 (and the usage view on 8081 when `LLM_GATEWAY_WEB_LISTEN=0.0.0.0:8081` is set with a login), keeps its database in the volume `/data` and reads the spheres file from `/etc/assistant/spheres.toml`:
 
 ```sh
 docker run -p 8080:8080 -v llm-gateway:/data \
