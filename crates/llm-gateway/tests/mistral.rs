@@ -2,13 +2,14 @@
 //! the real one.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use llm_gateway::{Mistral, Provider};
+use llm_gateway::{Mistral, Provider, ProviderError};
 use serde_json::{Value, json};
 
 const KEY: &str = "fake-mistral-key";
@@ -19,7 +20,8 @@ type Received = (Option<String>, Value);
 #[derive(Clone, Default)]
 struct FakeMistral {
     requests: Arc<Mutex<Vec<Received>>>,
-    fail: bool,
+    /// Answer with this status and these headers instead of embeddings.
+    fail: Option<(StatusCode, Vec<(&'static str, &'static str)>)>,
 }
 
 /// Answers like Mistral's `POST /v1/embeddings`, with the embeddings deliberately out of order.
@@ -32,10 +34,15 @@ async fn embeddings(
         .get(header::AUTHORIZATION)
         .map(|v| v.to_str().unwrap().to_string());
     fake.requests.lock().unwrap().push((auth, body.clone()));
-    if fake.fail {
+    if let Some((status, headers)) = fake.fail {
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            map.insert(name, value.parse().unwrap());
+        }
         return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "object": "error", "message": "overloaded" })),
+            status,
+            map,
+            Json(json!({ "object": "error", "message": "failed" })),
         );
     }
     let inputs = body["input"].as_array().unwrap();
@@ -53,6 +60,7 @@ async fn embeddings(
     data.reverse();
     (
         StatusCode::OK,
+        HeaderMap::new(),
         Json(json!({
             "id": "embd-1",
             "object": "list",
@@ -94,19 +102,65 @@ async fn sends_mistral_requests_and_reads_its_answers() {
     );
 }
 
-#[tokio::test]
-async fn reports_mistral_errors() {
-    let fake = FakeMistral {
-        fail: true,
+async fn fail_with(
+    status: StatusCode,
+    headers: Vec<(&'static str, &'static str)>,
+) -> ProviderError {
+    let url = start(FakeMistral {
+        fail: Some((status, headers)),
         ..Default::default()
-    };
-    let url = start(fake).await;
+    })
+    .await;
     let mistral = Mistral::new(KEY.into(), url.trim_end_matches('/')).unwrap();
+    mistral
+        .embed("mistral-embed", &["a".to_string()])
+        .await
+        .unwrap_err()
+}
+
+#[tokio::test]
+async fn rate_limits_and_server_errors_are_transient() {
+    let err = fail_with(StatusCode::SERVICE_UNAVAILABLE, vec![]).await;
+    assert!(err.transient, "{err}");
+    assert!(err.message.contains("503"), "{err}");
+    assert_eq!(err.retry_after, None);
+
+    let err = fail_with(StatusCode::TOO_MANY_REQUESTS, vec![("retry-after", "7")]).await;
+    assert!(err.transient, "{err}");
+    assert_eq!(err.retry_after, Some(Duration::from_secs(7)));
+
+    let err = fail_with(
+        StatusCode::TOO_MANY_REQUESTS,
+        vec![("retry-after", "7"), ("retry-after-ms", "1500")],
+    )
+    .await;
+    assert_eq!(err.retry_after, Some(Duration::from_millis(1500)));
+}
+
+#[tokio::test]
+async fn rejected_requests_are_permanent() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    ] {
+        let err = fail_with(status, vec![]).await;
+        assert!(!err.transient, "{status}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn an_unreachable_provider_is_transient() {
+    // Bind a port and close it again, so nothing listens there.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1/", listener.local_addr().unwrap());
+    drop(listener);
+    let mistral = Mistral::new(KEY.into(), &url).unwrap();
     let err = mistral
         .embed("mistral-embed", &["a".to_string()])
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("503"), "{err}");
+    assert!(err.transient, "{err}");
 }
 
 /// Calls the real Mistral API: `LLM_GATEWAY_MISTRAL_API_KEY=... cargo test -- --ignored`.

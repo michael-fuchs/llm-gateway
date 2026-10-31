@@ -17,6 +17,7 @@ FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d55
 COPY --from=build /out/llm-gateway /usr/local/bin/llm-gateway
 COPY --from=build --chown=65532:65532 /out/data /data
 ENV LLM_GATEWAY_DB=/data/llm-gateway.db \
+    LLM_GATEWAY_SPHERES=/etc/assistant/spheres.toml \
     LLM_GATEWAY_LISTEN=0.0.0.0:8080
 VOLUME /data
 WORKDIR /data

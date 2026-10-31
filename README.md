@@ -9,7 +9,7 @@ A small LLM gateway for self-hosted services. Services call it instead of an LLM
 
 It is one service of a personal assistant built from independent services (wiki, documents, calendar). Each service keeps its own job queue and calls the gateway for embeddings and, later, other LLM work. The gateway never queues work: it answers or refuses, and callers wait and retry on their side.
 
-Status: batch embeddings from Mistral with usage accounting and a monthly budget. Retries, rate limits and sphere rules are planned; see the issues.
+Status: batch embeddings from Mistral with usage accounting, a monthly budget, sphere rules, a rate limit per caller and retries against the provider. A usage view for the owner is planned; see the issues.
 
 ## API
 
@@ -25,9 +25,9 @@ Content-Type: application/json
 {"sphere": "work", "model": "mistral-embed", "inputs": ["first text", "second text"]}
 ```
 
-- `sphere`: lowercase letters, digits, `-` and `_`.
+- `sphere`: one of the spheres in the spheres file (see `--spheres`).
 - `model`: one of the configured models (see `--prices`).
-- `inputs`: 1 to 512 texts. The request body may be up to 8 MiB.
+- `inputs`: 1 to 512 texts, and no more than the caller's rate limit per minute. The request body may be up to 8 MiB.
 
 The answer has one embedding per input, in the order of the inputs, and what the call used:
 
@@ -44,21 +44,44 @@ The answer has one embedding per input, in the order of the inputs, and what the
 Errors have a JSON body with a machine-readable `code` and a message for people:
 
 ```json
-{"error": {"code": "budget_exhausted", "message": "the monthly budget of 10.00 EUR is used up until 2026-11-01T00:00:00Z", "retry_at": "2026-11-01T00:00:00Z"}}
+{"error": {"code": "budget_exhausted", "message": "the monthly budget of 10.00 EUR is used up until 2026-11-01T00:00:00Z", "retry_at": "2026-11-01T00:00:00Z", "retry_after_seconds": 43200}}
 ```
 
 | Status | `code`             | Meaning                                                                                                                                                                           |
 | ------ | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 400    | `invalid_request`  | The body is not a valid request (missing or unknown fields, no inputs, too many inputs, bad sphere name).                                                                         |
 | 400    | `unknown_model`    | The model has no configured price, so the gateway does not offer it.                                                                                                             |
+| 400    | `unknown_sphere`   | The sphere is not declared in the spheres file.                                                                                                                                  |
 | 401    | `unauthenticated`  | No bearer token, or not the key of a configured caller.                                                                                                                          |
-| 429    | `budget_exhausted` | The monthly budget is used up. Wait until `retry_at` (the start of the next month, UTC); the `Retry-After` header gives the same in seconds. The provider was not contacted. |
-| 502    | `provider_failure` | The provider refused the call or did not answer properly. Nothing was recorded; retry later.                                                                                    |
+| 403    | `sphere_rule`      | The sphere's rules do not allow its content to go to the provider. The provider was not contacted. Retrying does not help.                                                      |
+| 429    | `budget_exhausted` | The monthly budget is used up. Wait until `retry_at` (the start of the next month, UTC); `retry_after_seconds` and the `Retry-After` header give the same in seconds. The provider was not contacted. |
+| 429    | `rate_limited`     | The caller sent more texts than its rate limit allows. Wait `retry_after_seconds` (also in the `Retry-After` header). The provider was not contacted.                          |
+| 502    | `provider_failure` | The provider refused the call, or failed transiently until the time limit ran out. Nothing was recorded; retry later.                                                          |
 | 500    | `internal`         | The gateway's database failed.                                                                                                                                                    |
 
 ### `GET /health`
 
 Answers `ok` while the gateway runs.
+
+## Sphere rules, rate limit and retries
+
+A request is checked in this order before anything leaves the server: the request itself, the sphere's rules, the budget, the caller's rate limit.
+
+- **Sphere rules** come from the spheres file, the part of the assistant's central configuration rendered for the gateway (format version 1): a `[spheres.<name>]` table per sphere, whose optional `rules.llm` lists the only providers that may receive the sphere's content. An empty list allows none; without the key every provider is allowed. Other keys, such as descriptions and the wiki rule, are ignored. The file is read at startup.
+
+  ```toml
+  version = 1
+
+  [spheres.work]
+  rules = { llm = ["mistral"] }
+
+  [spheres.private]
+  ```
+
+- **Rate limit:** each caller may send `--inputs-per-minute` texts per minute. It may use a minute's allowance at once; the allowance then refills steadily. It counts texts rather than requests, because texts drive the cost.
+- **Retries:** rate limits (429), timeouts (408) and server errors (5xx) from the provider, failures to reach it and attempts without an answer within `--provider-attempt-timeout` are retried. Waits start at 0.5 s and double up to 10 s, or are as long as the provider asks with `Retry-After`. Once the next wait would end after `--provider-time-limit`, the request fails with `provider_failure`. Other errors (a rejected key or request) are not retried.
+
+Refusals for sphere rules, the budget and the rate limit are recorded in the database with their reason (`sphere_rule`, `budget_exhausted`, `rate_limited`).
 
 ## Usage and budget
 
@@ -79,21 +102,28 @@ Options are given on the command line or through the environment:
 | `--mistral-url`  | `LLM_GATEWAY_MISTRAL_URL`       | `https://api.mistral.ai/v1/` | Base URL of Mistral's API.                                                                                                                  |
 | `--budget-eur`   | `LLM_GATEWAY_BUDGET_EUR`        | `10`                        | Monthly budget for all callers together, in euros.                                                                                          |
 | `--prices`       | `LLM_GATEWAY_PRICES`            | `mistral-embed=0.1`         | Offered models and their prices as `<model>=<euros per million input tokens>`, comma-separated. Check them against the provider's price list. |
+| `--spheres`      | `LLM_GATEWAY_SPHERES`           | (required; `/etc/assistant/spheres.toml` in the image) | The spheres file with the sphere rules (see above).                                                                    |
+| `--inputs-per-minute` | `LLM_GATEWAY_INPUTS_PER_MINUTE` | `1000`                 | Texts each caller may send per minute; also the largest batch.                                                                              |
+| `--provider-time-limit` | `LLM_GATEWAY_PROVIDER_TIME_LIMIT` | `60`               | The longest a provider call may take in seconds, retries included.                                                                         |
+| `--provider-attempt-timeout` | `LLM_GATEWAY_PROVIDER_ATTEMPT_TIMEOUT` | `30`     | The longest one attempt waits for the provider's answer, in seconds.                                                                       |
 
 The caller keys and the Mistral key are secrets: pass them through the environment from the server's secret handling, not on the command line. Generate a caller key with, for example, `openssl rand -hex 32`. The log level is set with `RUST_LOG` (default `info`).
 
 ## Running
 
 ```sh
+printf 'version = 1\n[spheres.work]\n' > spheres.toml
 LLM_GATEWAY_CALLERS=mnemograph=$(openssl rand -hex 32) \
 LLM_GATEWAY_MISTRAL_API_KEY=... \
+LLM_GATEWAY_SPHERES=spheres.toml \
 cargo run -- serve
 ```
 
-The container image (`ghcr.io/michael-fuchs/llm-gateway`) is distroless and runs as a non-root user. It listens on port 8080 and keeps its database in the volume `/data`:
+The container image (`ghcr.io/michael-fuchs/llm-gateway`) is distroless and runs as a non-root user. It listens on port 8080, keeps its database in the volume `/data` and reads the spheres file from `/etc/assistant/spheres.toml`:
 
 ```sh
 docker run -p 8080:8080 -v llm-gateway:/data \
+  -v ./spheres.toml:/etc/assistant/spheres.toml:ro \
   -e LLM_GATEWAY_CALLERS=... -e LLM_GATEWAY_MISTRAL_API_KEY=... \
   ghcr.io/michael-fuchs/llm-gateway:main
 ```
@@ -106,7 +136,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test
 ```
 
-The tests use a fake provider and a fake Mistral API. One ignored test calls the real Mistral API:
+The tests use a fake provider and a fake Mistral API; retry and rate-limit tests run on tokio's paused clock, so they take no real time. One ignored test calls the real Mistral API:
 
 ```sh
 LLM_GATEWAY_MISTRAL_API_KEY=... cargo test -- --ignored

@@ -1,20 +1,28 @@
 //! The LLM gateway: services call it instead of an LLM provider; it holds the provider key,
-//! records usage per caller, sphere, provider and model, and enforces a monthly budget.
+//! records usage per caller, sphere, provider and model, and enforces the spheres' rules, a
+//! rate limit per caller and a monthly budget.
 
 pub mod api;
 pub mod callers;
+pub mod limits;
 pub mod money;
 pub mod provider;
+pub mod retry;
+pub mod spheres;
 pub mod usage;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, ToSpan};
 
 pub use callers::Callers;
+pub use limits::RateLimit;
 pub use money::{Eur, Prices};
 pub use provider::{Embeddings, Mistral, Provider, ProviderError};
+pub use retry::RetryPolicy;
+pub use spheres::{SphereError, Spheres};
 pub use usage::{Refusal, StoreError, Usage, UsageStore};
 
 /// The default monthly budget for all callers together.
@@ -56,6 +64,9 @@ pub struct Gateway {
     pub callers: Callers,
     pub prices: Prices,
     pub budget: Eur,
+    pub spheres: Spheres,
+    pub rate_limit: RateLimit,
+    pub retry: RetryPolicy,
     pub provider: Arc<dyn Provider>,
     pub store: UsageStore,
     pub clock: Clock,
@@ -84,6 +95,15 @@ pub enum EmbedError {
     InvalidRequest(String),
     #[error("the model {0:?} is not offered by this gateway")]
     UnknownModel(String),
+    #[error("the sphere {0:?} is not declared in the gateway's configuration")]
+    UnknownSphere(String),
+    #[error("the rules of sphere {sphere:?} do not allow sending its content to {provider}")]
+    SphereRule { sphere: String, provider: String },
+    #[error("the caller's rate limit of {per_minute} texts per minute is reached")]
+    RateLimited {
+        per_minute: u32,
+        retry_after: Duration,
+    },
     #[error("the monthly budget of {budget} is used up until {until}")]
     BudgetExhausted {
         budget: Eur,
@@ -100,8 +120,11 @@ pub enum EmbedError {
 impl Gateway {
     /// Answers an embeddings request, or refuses it before anything reaches the provider.
     ///
-    /// The budget is checked before the call, so concurrent calls may overrun it by what
-    /// they cost; the next call is then refused.
+    /// The checks run in this order: the request itself, the sphere's rules, the budget, the
+    /// caller's rate limit. Refusals for the last three are recorded. The budget is checked
+    /// before the call, so concurrent calls may overrun it by what they cost; the next call is
+    /// then refused. Transient provider failures are retried within the retry policy's time
+    /// limit.
     pub async fn embed(&self, request: EmbedRequest) -> Result<Embedded, EmbedError> {
         if !is_name(&request.sphere) {
             return Err(EmbedError::InvalidRequest(format!(
@@ -118,20 +141,31 @@ impl Gateway {
                 request.inputs.len()
             )));
         }
+        let per_minute = self.rate_limit.per_minute();
+        if request.inputs.len() > per_minute as usize {
+            return Err(EmbedError::InvalidRequest(format!(
+                "inputs has {} texts, more than the rate limit of {per_minute} per minute allows",
+                request.inputs.len()
+            )));
+        }
         if !self.prices.offers(&request.model) {
             return Err(EmbedError::UnknownModel(request.model));
         }
 
         let now = (self.clock)();
+        let provider = self.provider.name();
+        match self.spheres.check(&request.sphere, provider) {
+            Ok(()) => {}
+            Err(SphereError::Unknown(sphere)) => return Err(EmbedError::UnknownSphere(sphere)),
+            Err(SphereError::ProviderNotAllowed { sphere, provider }) => {
+                self.refuse(now, &request, "sphere_rule")?;
+                return Err(EmbedError::SphereRule { sphere, provider });
+            }
+        }
+
         let (month_start, next_month) = budget_period(now);
         if self.store.spent_since(month_start)? >= self.budget {
-            self.store.record_refusal(&Refusal {
-                at: now,
-                caller: request.caller,
-                sphere: request.sphere,
-                model: request.model,
-                reason: "budget_exhausted".into(),
-            })?;
+            self.refuse(now, &request, "budget_exhausted")?;
             return Err(EmbedError::BudgetExhausted {
                 budget: self.budget,
                 until: next_month,
@@ -139,7 +173,18 @@ impl Gateway {
             });
         }
 
-        let embeddings = self.provider.embed(&request.model, &request.inputs).await?;
+        if let Err(retry_after) = self.rate_limit.take(&request.caller, request.inputs.len()) {
+            self.refuse(now, &request, "rate_limited")?;
+            return Err(EmbedError::RateLimited {
+                per_minute,
+                retry_after,
+            });
+        }
+
+        let embeddings = self
+            .retry
+            .run(|| self.provider.embed(&request.model, &request.inputs))
+            .await?;
         let cost = self
             .prices
             .cost(&request.model, embeddings.input_tokens)
@@ -148,13 +193,28 @@ impl Gateway {
             at: (self.clock)(),
             caller: request.caller,
             sphere: request.sphere,
-            provider: self.provider.name().to_string(),
+            provider: provider.to_string(),
             model: request.model,
             inputs: request.inputs.len() as u64,
             input_tokens: embeddings.input_tokens,
             cost,
         })?;
         Ok(Embedded { embeddings, cost })
+    }
+
+    fn refuse(
+        &self,
+        at: Timestamp,
+        request: &EmbedRequest,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        self.store.record_refusal(&Refusal {
+            at,
+            caller: request.caller.clone(),
+            sphere: request.sphere.clone(),
+            model: request.model.clone(),
+            reason: reason.into(),
+        })
     }
 }
 
